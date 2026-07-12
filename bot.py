@@ -125,7 +125,7 @@ async def help_cmd(ctx):
     )
     embed.add_field(
         name="Music Search",
-        value="`+song <query>` – uses Playwright to search Saavn, download 320kbps MP3 and upload to Discord",
+        value="`+song <query>` – search Saavn, choose, download 320kbps MP3 and upload to Discord",
         inline=False
     )
     embed.set_footer(text="May the Force be with you.")
@@ -385,37 +385,30 @@ async def websearch_error(ctx, error):
         await ctx.reply(f"⏳ Please wait {error.retry_after:.1f}s before searching again.", mention_author=False)
 
 # ===========================
-# SONG – Playwright-based search (new)
+# SONG – Playwright-based search with fallback
 # ===========================
 @bot.command(name="song")
 @commands.cooldown(1, 20, commands.BucketType.user)
 async def saavn_song(ctx, *, query):
-    """Search Saavn using Playwright, download and upload 320kbps MP3."""
+    """Search Saavn, choose, download and upload 320kbps MP3."""
     msg = await ctx.reply("🔍 Searching for songs... (this may take a moment)", mention_author=False)
 
     try:
         from playwright.async_api import async_playwright
 
         async with async_playwright() as p:
-            # Launch headless Chromium
             browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
             page = await browser.new_page()
 
-            # Go to Saavn
             await page.goto("https://saavn.squid.wtf/", timeout=30000)
-
-            # Wait for search input
             await page.wait_for_selector('input[type="text"]', timeout=10000)
 
-            # Type the query and submit
             search_input = await page.query_selector('input[type="text"]')
             await search_input.fill(query)
             await search_input.press("Enter")
 
-            # Wait for results to load – wait for a result item
             await page.wait_for_selector('.result-item', timeout=15000)
 
-            # Extract first 10 results
             results = await page.evaluate('''
                 () => {
                     const items = document.querySelectorAll('.result-item');
@@ -442,7 +435,15 @@ async def saavn_song(ctx, *, query):
             for i, r in enumerate(results, 1):
                 lines.append(f"`{i}.` **{r['title']}** – {r['artist']}")
             result_msg = "🎵 **Choose a song (reply with number):**\n" + "\n".join(lines)
-            await msg.edit(content=result_msg)
+
+            # Check if message is too long (Discord limit 4000 chars)
+            if len(result_msg) > 4000:
+                # Send as a file instead
+                file_content = result_msg
+                file_obj = discord.File(io.BytesIO(file_content.encode('utf-8')), filename="song_list.txt")
+                await msg.edit(content="🎵 **Song list is too long. See attached file.**", attachments=[file_obj])
+            else:
+                await msg.edit(content=result_msg)
 
             def check(m):
                 return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
@@ -464,7 +465,6 @@ async def saavn_song(ctx, *, query):
 
                 await ctx.reply(f"📥 Downloading **{selected['title']}** by {selected['artist']}...", mention_author=False)
 
-                # Download the file with aiohttp
                 async with aiohttp.ClientSession() as session:
                     async with session.get(download_url) as file_resp:
                         if file_resp.status != 200:
@@ -490,9 +490,87 @@ async def saavn_song(ctx, *, query):
                 await browser.close()
 
     except ImportError:
-        await ctx.reply("❌ Playwright not installed. Ask owner to add `playwright` to requirements and install browsers.", mention_author=False)
+        await msg.edit(content="❌ Playwright not installed. Ask owner to add `playwright` to requirements and install browsers.")
     except Exception as e:
-        await ctx.reply(f"❌ Error: {e}", mention_author=False)
+        # Fallback to jiosaavn-api if Playwright fails
+        print(f"Playwright failed: {e}, falling back to jiosaavn-api")
+        await fallback_jiosaavn(ctx, query, msg)
+
+async def fallback_jiosaavn(ctx, query, msg):
+    """Fallback to jiosaavn-api library if Playwright fails."""
+    try:
+        from jiosaavn import JioSaavn
+        api = JioSaavn()
+        results = api.search(query, type="song")
+        if not results or not results.get("results"):
+            await msg.edit(content="❌ No songs found.")
+            return
+
+        songs = results["results"][:10]
+        lines = []
+        for i, track in enumerate(songs, 1):
+            title = track.get("title", "Unknown")
+            artist = track.get("artist", "Unknown")
+            lines.append(f"`{i}.` **{title}** – {artist}")
+        result_msg = "🎵 **Choose a song (reply with number):**\n" + "\n".join(lines)
+
+        if len(result_msg) > 4000:
+            file_content = result_msg
+            file_obj = discord.File(io.BytesIO(file_content.encode('utf-8')), filename="song_list.txt")
+            await msg.edit(content="🎵 **Song list is too long. See attached file.**", attachments=[file_obj])
+        else:
+            await msg.edit(content=result_msg)
+
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
+
+        try:
+            selection_msg = await bot.wait_for('message', check=check, timeout=30)
+            choice = int(selection_msg.content) - 1
+            if choice < 0 or choice >= len(songs):
+                await ctx.reply("❌ Invalid number.", mention_author=False)
+                return
+
+            selected = songs[choice]
+            title = selected.get("title", "Song")
+            artist = selected.get("artist", "Unknown")
+
+            download_url = selected.get("download_url", {}).get("320kbps")
+            if not download_url:
+                for quality in ["320kbps", "190kbps", "128kbps"]:
+                    if selected.get("download_url", {}).get(quality):
+                        download_url = selected["download_url"][quality]
+                        break
+            if not download_url:
+                await ctx.reply("❌ No download URL available.", mention_author=False)
+                return
+
+            await ctx.reply(f"📥 Downloading **{title}** by {artist} (320kbps)...", mention_author=False)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(download_url) as file_resp:
+                    if file_resp.status != 200:
+                        await ctx.reply("❌ Failed to download.", mention_author=False)
+                        return
+                    file_data = await file_resp.read()
+                    file_size = len(file_data)
+
+            filename = f"{title.replace('/', '-').replace(' ', '_')}.mp3"
+            if file_size > 8 * 1024 * 1024:
+                await ctx.reply(f"⚠️ File too large ({file_size/1024/1024:.1f}MB). Direct link: {download_url}", mention_author=False)
+                return
+
+            await ctx.reply("📤 Uploading to Discord...", mention_author=False)
+            file_obj = discord.File(io.BytesIO(file_data), filename=filename)
+            await ctx.reply(f"✅ **{title}** by {artist}", file=file_obj, mention_author=False)
+
+        except asyncio.TimeoutError:
+            await ctx.reply("⏰ Selection timed out.", mention_author=False)
+
+    except ImportError:
+        await msg.edit(content="❌ Both Playwright and jiosaavn-api unavailable. Ask owner to install `jiosaavn-api`.")
+    except Exception as e2:
+        await msg.edit(content=f"❌ Error: {e2}")
 
 @saavn_song.error
 async def saavn_song_error(ctx, error):
@@ -500,7 +578,7 @@ async def saavn_song_error(ctx, error):
         await ctx.reply(f"⏳ Please wait {error.retry_after:.1f}s before using `+song` again.", mention_author=False)
 
 # ===========================
-# DEEZER (optional, keep as is)
+# DEEZER (optional)
 # ===========================
 @bot.command(name="deezer")
 async def deezer_cmd(ctx, *, query):
