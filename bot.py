@@ -3,6 +3,7 @@ from discord.ext import commands
 import asyncio
 import os
 import json
+import io
 from datetime import datetime, timedelta
 from config import DISCORD_TOKEN, PREFIX, OWNER_ID
 from utils import ensure_dir, format_uptime
@@ -14,7 +15,6 @@ from search import search
 from lore import seed_lore
 from relationship import get_relationship_summary
 from moderation import is_toxic
-import io
 
 ensure_dir("database")
 ensure_dir("logs")
@@ -31,11 +31,11 @@ intents.messages = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-# In-memory facts storage (per user)
+# In-memory facts (key: user_id, value: dict)
 facts = {}
 
 # ===========================
-# BACKGROUND TASK
+# BACKGROUND TASK: DM owner with uptime every 30 min
 # ===========================
 async def dm_owner_uptime():
     await bot.wait_until_ready()
@@ -111,7 +111,11 @@ async def help_cmd(ctx):
         description="I speak calmly and carry a lightsaber.",
         color=0x3498db
     )
-    embed.add_field(name="Commands", value="`+help` · `+ping` · `+uptime` · `+status` · `+reset` · `+relationship` · `+lore` · `+search` · `+testgemini` · `+fact` · `+log` · `+test`", inline=False)
+    embed.add_field(
+        name="Commands",
+        value="`+help` · `+ping` · `+uptime` · `+status` · `+reset` · `+relationship` · `+lore` · `+search` · `+testgemini` · `+fact` · `+log` · `+test`",
+        inline=False
+    )
     embed.set_footer(text="May the Force be with you.")
     await ctx.reply(embed=embed, mention_author=False)
 
@@ -131,7 +135,7 @@ async def lore_cmd(ctx):
 
 @bot.command(name="fact")
 async def fact_cmd(ctx, action, key=None, *, value=None):
-    """Store or retrieve a fact about a user. Usage: +fact set <key> <value> | +fact get <key> | +fact list"""
+    """Store or retrieve a fact about a user."""
     uid = str(ctx.author.id)
     if uid not in facts:
         facts[uid] = {}
@@ -179,38 +183,38 @@ async def search_cmd(ctx, *, query):
     await ctx.reply(reply, mention_author=False)
 
 @bot.command(name="log")
-async def log_cmd(ctx):
-    """Generate a detailed log of the current channel and send as a file."""
+async def log_cmd(ctx, *, args=""):
+    """Generate a detailed log of the channel. Use --all to include bot messages."""
+    include_bots = "--all" in args
     await ctx.reply("📋 Generating channel log... please wait.", mention_author=False)
     try:
-        # Gather all messages in the channel
         messages = []
         async for msg in ctx.channel.history(limit=1000):
-            if msg.author.bot:
+            if not include_bots and msg.author.bot:
                 continue
             messages.append({
                 "timestamp": msg.created_at.isoformat(),
                 "author": msg.author.display_name,
                 "author_id": str(msg.author.id),
+                "is_bot": msg.author.bot,
                 "content": msg.clean_content,
                 "attachments": [a.url for a in msg.attachments],
                 "embeds": [e.title for e in msg.embeds],
                 "reactions": [str(r) for r in msg.reactions]
             })
-        messages.reverse()  # chronological
-
-        # Build a detailed report
+        messages.reverse()
         report = []
         report.append("=" * 60)
         report.append(f"CHANNEL LOG: {ctx.channel.name} (ID: {ctx.channel.id})")
         report.append(f"Generated: {datetime.utcnow().isoformat()}")
+        report.append(f"Include bot messages: {include_bots}")
         report.append("=" * 60)
         report.append(f"Total messages: {len(messages)}")
         report.append("")
         for i, m in enumerate(messages, 1):
             report.append(f"--- Message {i} ---")
             report.append(f"Timestamp: {m['timestamp']}")
-            report.append(f"Author: {m['author']} (ID: {m['author_id']})")
+            report.append(f"Author: {m['author']} (ID: {m['author_id']}) {'[BOT]' if m['is_bot'] else ''}")
             report.append(f"Content: {m['content']}")
             if m['attachments']:
                 report.append(f"Attachments: {', '.join(m['attachments'])}")
@@ -221,8 +225,6 @@ async def log_cmd(ctx):
             report.append("")
         report.append("=" * 60)
         report.append("END OF LOG")
-
-        # Send as a file
         filename = f"log_{ctx.channel.id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.txt"
         with io.StringIO() as f:
             f.write("\n".join(report))
