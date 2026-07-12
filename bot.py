@@ -2,12 +2,12 @@ import discord
 from discord.ext import commands
 import asyncio
 from datetime import datetime
-from config import DISCORD_TOKEN, PREFIX, OWNER_ID, MAX_TOKENS
+from config import DISCORD_TOKEN, PREFIX, OWNER_ID
 from utils import ensure_dir, format_uptime
 from database import init_db, get_or_create_user, get_all_lore
 from memory import add_user_message, add_assistant_message, get_short_history, clear_short_history, remember_long_term
 from context import get_recent_channel_messages
-from ai import generate_reply, generate_from_raw_info
+from ai import generate_reply, generate_from_raw_info, _get_gemini_client
 from search import search
 from lore import seed_lore
 from relationship import get_relationship_summary
@@ -59,6 +59,20 @@ async def send_uptime_dm(user):
 async def test(ctx):
     await ctx.reply("Test command works!", mention_author=False)
 
+@bot.command(name="testgemini")
+async def testgemini(ctx, *, prompt):
+    """Test Gemini directly with a prompt."""
+    await ctx.reply(f"🧪 Testing Gemini with: `{prompt}`", mention_author=False)
+    try:
+        model = _get_gemini_client()
+        response = model.generate_content(prompt, generation_config={"temperature": 0.7})
+        if response.candidates and response.candidates[0].content:
+            await ctx.reply(f"✅ Gemini response:\n```{response.text[:500]}```", mention_author=False)
+        else:
+            await ctx.reply("❌ Gemini returned no response.", mention_author=False)
+    except Exception as e:
+        await ctx.reply(f"❌ Gemini error: {e}", mention_author=False)
+
 @bot.command(name="ping")
 async def ping(ctx):
     await ctx.reply(f"🏓 Pong! {round(bot.latency * 1000)} ms", mention_author=False)
@@ -79,7 +93,7 @@ async def help_cmd(ctx):
         description="I speak calmly and carry a lightsaber.",
         color=0x3498db
     )
-    embed.add_field(name="Commands", value="`+help` · `+ping` · `+uptime` · `+reset` · `+relationship` · `+lore` · `+search` · `+test`", inline=False)
+    embed.add_field(name="Commands", value="`+help` · `+ping` · `+uptime` · `+reset` · `+relationship` · `+lore` · `+search` · `+testgemini` · `+test`", inline=False)
     embed.set_footer(text="May the Force be with you.")
     await ctx.reply(embed=embed, mention_author=False)
 
