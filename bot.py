@@ -6,7 +6,7 @@ import time
 import requests
 import sqlite3
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from groq import Groq
 import google.generativeai as genai
 
@@ -44,7 +44,12 @@ OWNER_ID = int(os.getenv("OWNER_ID", 778695192684920842))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "database/bot.db")
 
 # ===========================
-# PERSONA (unchanged)
+# START TIME – uptime tracking
+# ===========================
+START_TIME = datetime.utcnow()
+
+# ===========================
+# PERSONA
 # ===========================
 BASE_SYSTEM_PROMPT = """
 You are Obi-Wan Kenobi from Star Wars.
@@ -386,7 +391,7 @@ def generate_from_raw_info(user_id, query, raw_info):
     return "I'm sorry, I couldn't retrieve that information at the moment."
 
 # ===========================
-# GEMINI SEARCH WITH KEY ROTATION
+# GEMINI SEARCH WITH KEY ROTATION (FIXED)
 # ===========================
 _gemini_index = 0
 
@@ -400,12 +405,15 @@ def _get_gemini_client():
 def gemini_search(query):
     try:
         model = _get_gemini_client()
+        # Enable google_search tool correctly
         response = model.generate_content(
             query,
             generation_config={"temperature": 0.2},
             tools=[{"google_search": {}}]
         )
+        # Check if we got a search result
         if response.candidates and response.candidates[0].content:
+            # Extract text from the response
             return response.text
         else:
             print("[Gemini] No search result.")
@@ -415,7 +423,7 @@ def gemini_search(query):
         return None
 
 # ===========================
-# FALLBACK SEARCH (DuckDuckGo)
+# FALLBACK SEARCH (DuckDuckGo with proper headers)
 # ===========================
 def duckduckgo_search(query):
     try:
@@ -426,7 +434,10 @@ def duckduckgo_search(query):
             "no_html": 1,
             "skip_disambig": 1
         }
-        response = requests.get(url, params=params, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         if data.get("AbstractText"):
@@ -464,6 +475,36 @@ intents.messages = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
+# ===========================
+# BACKGROUND TASK: DM owner every 30 mins with uptime
+# ===========================
+async def dm_owner_uptime():
+    await bot.wait_until_ready()
+    owner = bot.get_user(OWNER_ID)
+    if not owner:
+        print(f"⚠️ Could not find owner with ID {OWNER_ID}")
+        return
+    while not bot.is_closed():
+        now = datetime.utcnow()
+        uptime = now - START_TIME
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        message = (
+            f"⏰ **Uptime Report**\n"
+            f"I've been online for **{days}d {hours}h {minutes}m {seconds}s**.\n"
+            f"Deployed since: {START_TIME.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        )
+        try:
+            await owner.send(message)
+            print("[Uptime] DM sent to owner.")
+        except Exception as e:
+            print(f"[Uptime] Failed to DM owner: {e}")
+        await asyncio.sleep(1800)  # 30 minutes
+
+# ===========================
+# COMMANDS
+# ===========================
 @bot.command(name="test")
 async def test(ctx):
     await ctx.reply("Test command works!", mention_author=False)
@@ -506,22 +547,30 @@ async def lore_cmd(ctx):
 async def search_cmd(ctx, *, query):
     print(f"[COMMAND] +search invoked with query: {query}")
     await ctx.reply("🔍 Searching the galaxy for you...", mention_author=False)
+
+    # Try Gemini first
     try:
         raw = await asyncio.to_thread(gemini_search, query)
         print(f"[COMMAND] Gemini raw result: {raw[:200] if raw else None}")
     except Exception as e:
         print(f"[COMMAND] Gemini thread error: {e}")
         raw = None
+
+    # Fallback to DuckDuckGo
     if not raw:
         print("[COMMAND] Falling back to DuckDuckGo")
         try:
             raw = await asyncio.to_thread(duckduckgo_search, query)
+            print(f"[COMMAND] DuckDuckGo raw result: {raw[:200] if raw else None}")
         except Exception as e:
             print(f"[COMMAND] DuckDuckGo thread error: {e}")
             raw = None
+
     if raw is None:
         await ctx.reply("I couldn't find any information on that. Try a different query.", mention_author=False)
         return
+
+    # Rephrase as Obi-Wan using Groq
     try:
         reply = await asyncio.to_thread(generate_from_raw_info, ctx.author.id, query, raw)
         print(f"[COMMAND] Rephrased reply: {reply[:100]}")
@@ -542,6 +591,10 @@ async def on_ready():
     seed_lore()
     print(f"✅ Logged in as {bot.user}")
     print(f"Commands: {[c.name for c in bot.commands]}")
+    print(f"Owner ID: {OWNER_ID}")
+
+    # Start the background DM task
+    bot.loop.create_task(dm_owner_uptime())
 
 @bot.event
 async def on_message(message):
@@ -578,5 +631,8 @@ async def on_command_error(ctx, error):
         return
     await ctx.reply(f"Command error: {error}", mention_author=False)
 
+# ===========================
+# RUN
+# ===========================
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
