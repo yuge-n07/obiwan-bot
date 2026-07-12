@@ -58,70 +58,6 @@ Never refer to them as fiction or movies.
 Your goal is to feel like Obi-Wan is chatting naturally with friends.
 """
 
-def assemble_prompt(user_id, short_history, channel_context):
-    system = BASE_SYSTEM_PROMPT
-    system += f"\n\nCurrent date and time: {current_time()}\n"
-    lore_text = get_lore_context()
-    if lore_text:
-        system += f"\nLore you remember:\n{lore_text}\n"
-    rel_summary = get_relationship_summary(user_id)
-    system += f"\nRelationship with this user: {rel_summary}\n"
-    memories = recall_long_term(user_id, limit=5)
-    if memories:
-        mem_text = "\n".join(f"- {m['content']}" for m in memories)
-        system += f"\nYou recall these past conversations with this user:\n{mem_text}\n"
-    if channel_context:
-        context_text = "\n".join(
-            f"{m['author']}: {m['content']}" for m in channel_context[-10:]
-        )
-        system += f"\nRecent conversation in this channel:\n{context_text}\n"
-    messages = []
-    messages.append({"role": "user", "content": system + "\n\n" + short_history[-1]['content'] if short_history else ""})
-    # Better: we need to format for Gemini (which uses a different message format)
-    # For Gemini, we can just send the whole system + context as a single user message
-    # So we'll build a combined prompt
-    combined = system + "\n\n"
-    if short_history:
-        for msg in short_history:
-            combined += f"{msg['role']}: {msg['content']}\n"
-    return combined  # return as a single string for Gemini
-
-def generate_reply(user_id, short_history, channel_context):
-    # Try Gemini first
-    try:
-        prompt = assemble_prompt(user_id, short_history, channel_context)
-        model = _get_gemini_client()
-        response = model.generate_content(prompt, generation_config={"temperature": TEMPERATURE, "top_p": TOP_P})
-        if response.candidates and response.candidates[0].content:
-            print("[AI] Used Gemini 3.5 Flash")
-            return response.text.strip()
-    except Exception as e:
-        print(f"Gemini error: {e}, falling back to Groq")
-
-    # Fallback to Groq
-    try:
-        messages = assemble_prompt_groq(user_id, short_history, channel_context)  # we need a separate function for Groq format
-        for _ in range(len(GROQ_API_KEYS)):
-            client = _get_groq_client()
-            try:
-                response = client.chat.completions.create(
-                    model=MODEL,
-                    messages=messages,
-                    temperature=TEMPERATURE,
-                    top_p=TOP_P,
-                    max_completion_tokens=MAX_TOKENS,
-                )
-                print("[AI] Used Groq")
-                return response.choices[0].message.content.strip()
-            except Exception as e:
-                if "rate_limit" in str(e).lower() or "429" in str(e):
-                    time.sleep(1)
-                    continue
-                raise e
-    except Exception as e:
-        print(f"Groq error: {e}")
-    return "I'm afraid my connection to the Force is temporarily disrupted."
-
 def assemble_prompt_groq(user_id, short_history, channel_context):
     system = BASE_SYSTEM_PROMPT
     system += f"\n\nCurrent date and time: {current_time()}\n"
@@ -143,8 +79,68 @@ def assemble_prompt_groq(user_id, short_history, channel_context):
     messages.extend(short_history)
     return messages
 
+def assemble_prompt_gemini(user_id, short_history, channel_context):
+    # Build a combined prompt for Gemini (single user message)
+    system = BASE_SYSTEM_PROMPT
+    system += f"\n\nCurrent date and time: {current_time()}\n"
+    lore_text = get_lore_context()
+    if lore_text:
+        system += f"\nLore you remember:\n{lore_text}\n"
+    rel_summary = get_relationship_summary(user_id)
+    system += f"\nRelationship with this user: {rel_summary}\n"
+    memories = recall_long_term(user_id, limit=5)
+    if memories:
+        mem_text = "\n".join(f"- {m['content']}" for m in memories)
+        system += f"\nYou recall these past conversations with this user:\n{mem_text}\n"
+    if channel_context:
+        context_text = "\n".join(
+            f"{m['author']}: {m['content']}" for m in channel_context[-10:]
+        )
+        system += f"\nRecent conversation in this channel:\n{context_text}\n"
+    combined = system + "\n\n"
+    if short_history:
+        for msg in short_history:
+            combined += f"{msg['role']}: {msg['content']}\n"
+    return combined
+
+def generate_reply(user_id, short_history, channel_context):
+    # Try Gemini first
+    try:
+        prompt = assemble_prompt_gemini(user_id, short_history, channel_context)
+        model = _get_gemini_client()
+        response = model.generate_content(prompt, generation_config={"temperature": TEMPERATURE, "top_p": TOP_P})
+        if response.candidates and response.candidates[0].content:
+            print("[AI] Used Gemini 3.5 Flash")
+            return response.text.strip()
+    except Exception as e:
+        print(f"Gemini error: {e}, falling back to Groq")
+
+    # Fallback to Groq
+    try:
+        messages = assemble_prompt_groq(user_id, short_history, channel_context)
+        for _ in range(len(GROQ_API_KEYS)):
+            client = _get_groq_client()
+            try:
+                response = client.chat.completions.create(
+                    model=MODEL,
+                    messages=messages,
+                    temperature=TEMPERATURE,
+                    top_p=TOP_P,
+                    max_completion_tokens=MAX_TOKENS,
+                )
+                print("[AI] Used Groq")
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                if "rate_limit" in str(e).lower() or "429" in str(e):
+                    time.sleep(1)
+                    continue
+                raise e
+    except Exception as e:
+        print(f"Groq error: {e}")
+    return "I'm afraid my connection to the Force is temporarily disrupted."
+
 def generate_from_raw_info(user_id, query, raw_info):
-    # This is used for search rephrase – also try Gemini first
+    # Try Gemini first for rephrase
     try:
         prompt = f"{BASE_SYSTEM_PROMPT}\n\nCurrent date and time: {current_time()}\n\nYou are responding to a user who asked for information. The following is factual data obtained from a search. Your task is to respond in character, naturally, using this information. Don't mention the search itself, just speak as if you know it.\n\nFactual information:\n{raw_info}\n\nUser query: {query}"
         model = _get_gemini_client()

@@ -1,5 +1,4 @@
 import requests
-import os
 import re
 
 def duckduckgo_search(query):
@@ -17,7 +16,6 @@ def duckduckgo_search(query):
                 if "Text" in topic:
                     return topic["Text"]
                 if "Result" in topic:
-                    # clean HTML tags
                     return re.sub(r'<[^>]+>', '', topic["Result"])
         return None
     except Exception as e:
@@ -27,7 +25,6 @@ def duckduckgo_search(query):
 def wikipedia_search(query):
     try:
         url = "https://en.wikipedia.org/api/rest_v1/page/summary/"
-        # Sanitize query
         page = query.strip().replace(" ", "_")
         r = requests.get(url + page, timeout=10)
         if r.status_code == 200:
@@ -40,10 +37,8 @@ def wikipedia_search(query):
         return None
 
 def search(query):
-    # Try DuckDuckGo first
     result = duckduckgo_search(query)
     if result:
         return result
-    # Fallback to Wikipedia
     print("[Search] Falling back to Wikipedia")
     return wikipedia_search(query)
