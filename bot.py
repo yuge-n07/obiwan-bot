@@ -1,7 +1,9 @@
 import discord
 from discord.ext import commands
 import asyncio
-from datetime import datetime
+import os
+import json
+from datetime import datetime, timedelta
 from config import DISCORD_TOKEN, PREFIX, OWNER_ID
 from utils import ensure_dir, format_uptime
 from database import init_db, get_or_create_user, get_all_lore
@@ -12,6 +14,7 @@ from search import search
 from lore import seed_lore
 from relationship import get_relationship_summary
 from moderation import is_toxic
+import io
 
 ensure_dir("database")
 ensure_dir("logs")
@@ -27,6 +30,9 @@ intents.members = True
 intents.messages = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
+
+# In-memory facts storage (per user)
+facts = {}
 
 # ===========================
 # BACKGROUND TASK
@@ -61,7 +67,6 @@ async def test(ctx):
 
 @bot.command(name="testgemini")
 async def testgemini(ctx, *, prompt):
-    """Test Gemini directly with a prompt."""
     await ctx.reply(f"🧪 Testing Gemini with: `{prompt}`", mention_author=False)
     try:
         model = _get_gemini_client()
@@ -81,6 +86,19 @@ async def ping(ctx):
 async def uptime_cmd(ctx):
     await ctx.reply(f"⏱️ Online for **{format_uptime(START_TIME)}**.", mention_author=False)
 
+@bot.command(name="status")
+async def status_cmd(ctx):
+    embed = discord.Embed(
+        title="Obi-Wan Kenobi – Status",
+        color=0x3498db
+    )
+    embed.add_field(name="Uptime", value=format_uptime(START_TIME), inline=False)
+    embed.add_field(name="Model", value="Gemini 3.5 Flash (primary) / Groq (fallback)", inline=False)
+    embed.add_field(name="Prefix", value=PREFIX, inline=True)
+    embed.add_field(name="History limit", value=f"{len(get_short_history(ctx.channel.id))}/{MAX_HISTORY}", inline=True)
+    embed.set_footer(text="May the Force be with you.")
+    await ctx.reply(embed=embed, mention_author=False)
+
 @bot.command(name="reset")
 async def reset(ctx):
     clear_short_history(ctx.channel.id)
@@ -93,7 +111,7 @@ async def help_cmd(ctx):
         description="I speak calmly and carry a lightsaber.",
         color=0x3498db
     )
-    embed.add_field(name="Commands", value="`+help` · `+ping` · `+uptime` · `+reset` · `+relationship` · `+lore` · `+search` · `+testgemini` · `+test`", inline=False)
+    embed.add_field(name="Commands", value="`+help` · `+ping` · `+uptime` · `+status` · `+reset` · `+relationship` · `+lore` · `+search` · `+testgemini` · `+fact` · `+log` · `+test`", inline=False)
     embed.set_footer(text="May the Force be with you.")
     await ctx.reply(embed=embed, mention_author=False)
 
@@ -110,6 +128,36 @@ async def lore_cmd(ctx):
         await ctx.reply(f"📖 {reply}", mention_author=False)
     else:
         await ctx.reply("No lore stored.", mention_author=False)
+
+@bot.command(name="fact")
+async def fact_cmd(ctx, action, key=None, *, value=None):
+    """Store or retrieve a fact about a user. Usage: +fact set <key> <value> | +fact get <key> | +fact list"""
+    uid = str(ctx.author.id)
+    if uid not in facts:
+        facts[uid] = {}
+    if action.lower() == "set":
+        if not key or not value:
+            await ctx.reply("Usage: `+fact set <key> <value>`", mention_author=False)
+            return
+        facts[uid][key] = value
+        await ctx.reply(f"✅ Fact stored: `{key}` → `{value}`", mention_author=False)
+    elif action.lower() == "get":
+        if not key:
+            await ctx.reply("Usage: `+fact get <key>`", mention_author=False)
+            return
+        val = facts[uid].get(key)
+        if val:
+            await ctx.reply(f"📌 `{key}` → `{val}`", mention_author=False)
+        else:
+            await ctx.reply(f"❌ No fact found for `{key}`", mention_author=False)
+    elif action.lower() == "list":
+        if facts[uid]:
+            msg = "\n".join(f"`{k}` → `{v}`" for k, v in facts[uid].items())
+            await ctx.reply(f"📋 Your facts:\n{msg}", mention_author=False)
+        else:
+            await ctx.reply("You have no stored facts.", mention_author=False)
+    else:
+        await ctx.reply("Unknown action. Use `set`, `get`, or `list`.", mention_author=False)
 
 @bot.command(name="testsearch")
 async def testsearch_cmd(ctx, *, query):
@@ -129,6 +177,64 @@ async def search_cmd(ctx, *, query):
         return
     reply = await asyncio.to_thread(generate_from_raw_info, ctx.author.id, query, raw)
     await ctx.reply(reply, mention_author=False)
+
+@bot.command(name="log")
+async def log_cmd(ctx):
+    """Generate a detailed log of the current channel and send as a file."""
+    await ctx.reply("📋 Generating channel log... please wait.", mention_author=False)
+    try:
+        # Gather all messages in the channel
+        messages = []
+        async for msg in ctx.channel.history(limit=1000):
+            if msg.author.bot:
+                continue
+            messages.append({
+                "timestamp": msg.created_at.isoformat(),
+                "author": msg.author.display_name,
+                "author_id": str(msg.author.id),
+                "content": msg.clean_content,
+                "attachments": [a.url for a in msg.attachments],
+                "embeds": [e.title for e in msg.embeds],
+                "reactions": [str(r) for r in msg.reactions]
+            })
+        messages.reverse()  # chronological
+
+        # Build a detailed report
+        report = []
+        report.append("=" * 60)
+        report.append(f"CHANNEL LOG: {ctx.channel.name} (ID: {ctx.channel.id})")
+        report.append(f"Generated: {datetime.utcnow().isoformat()}")
+        report.append("=" * 60)
+        report.append(f"Total messages: {len(messages)}")
+        report.append("")
+        for i, m in enumerate(messages, 1):
+            report.append(f"--- Message {i} ---")
+            report.append(f"Timestamp: {m['timestamp']}")
+            report.append(f"Author: {m['author']} (ID: {m['author_id']})")
+            report.append(f"Content: {m['content']}")
+            if m['attachments']:
+                report.append(f"Attachments: {', '.join(m['attachments'])}")
+            if m['embeds']:
+                report.append(f"Embeds: {', '.join(m['embeds'])}")
+            if m['reactions']:
+                report.append(f"Reactions: {', '.join(m['reactions'])}")
+            report.append("")
+        report.append("=" * 60)
+        report.append("END OF LOG")
+
+        # Send as a file
+        filename = f"log_{ctx.channel.id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.txt"
+        with io.StringIO() as f:
+            f.write("\n".join(report))
+            await ctx.reply(
+                file=discord.File(
+                    fp=io.BytesIO(f.getvalue().encode('utf-8')),
+                    filename=filename
+                ),
+                mention_author=False
+            )
+    except Exception as e:
+        await ctx.reply(f"❌ Error generating log: {e}", mention_author=False)
 
 # ===========================
 # EVENTS
