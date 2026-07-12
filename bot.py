@@ -125,7 +125,7 @@ async def help_cmd(ctx):
     )
     embed.add_field(
         name="Music Search",
-        value="`+song <query>` – search Saavn, choose, download 320kbps MP3 and upload to Discord",
+        value="`+song <query>` – uses Playwright to search Saavn, download 320kbps MP3 and upload to Discord",
         inline=False
     )
     embed.set_footer(text="May the Force be with you.")
@@ -385,100 +385,112 @@ async def websearch_error(ctx, error):
         await ctx.reply(f"⏳ Please wait {error.retry_after:.1f}s before searching again.", mention_author=False)
 
 # ===========================
-# SONG – Saavn search & download (working 320kbps)
+# SONG – Playwright-based search (new)
 # ===========================
 @bot.command(name="song")
-@commands.cooldown(1, 10, commands.BucketType.user)
+@commands.cooldown(1, 20, commands.BucketType.user)
 async def saavn_song(ctx, *, query):
-    """Search for a song on Saavn, download and upload the 320kbps MP3."""
-    msg = await ctx.reply("🔍 Searching for songs...", mention_author=False)
+    """Search Saavn using Playwright, download and upload 320kbps MP3."""
+    msg = await ctx.reply("🔍 Searching for songs... (this may take a moment)", mention_author=False)
 
     try:
-        async with aiohttp.ClientSession() as session:
-            # Use the working saavn.dev API
-            search_url = f"https://saavn.dev/api/search?query={query.replace(' ', '+')}"
-            async with session.get(search_url) as resp:
-                if resp.status != 200:
-                    await msg.edit(content="❌ Saavn API error. Please try again later.")
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            # Launch headless Chromium
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
+            page = await browser.new_page()
+
+            # Go to Saavn
+            await page.goto("https://saavn.squid.wtf/", timeout=30000)
+
+            # Wait for search input
+            await page.wait_for_selector('input[type="text"]', timeout=10000)
+
+            # Type the query and submit
+            search_input = await page.query_selector('input[type="text"]')
+            await search_input.fill(query)
+            await search_input.press("Enter")
+
+            # Wait for results to load – wait for a result item
+            await page.wait_for_selector('.result-item', timeout=15000)
+
+            # Extract first 10 results
+            results = await page.evaluate('''
+                () => {
+                    const items = document.querySelectorAll('.result-item');
+                    const data = [];
+                    items.forEach((el, i) => {
+                        if (i >= 10) return;
+                        const title = el.querySelector('.title')?.innerText || 'Unknown';
+                        const artist = el.querySelector('.artist')?.innerText || 'Unknown';
+                        const downloadBtn = el.querySelector('.download-btn');
+                        const downloadUrl = downloadBtn ? downloadBtn.getAttribute('data-url') : null;
+                        data.push({ title, artist, downloadUrl });
+                    });
+                    return data;
+                }
+            ''')
+
+            if not results:
+                await msg.edit(content="❌ No songs found.")
+                await browser.close()
+                return
+
+            # Build list for user
+            lines = []
+            for i, r in enumerate(results, 1):
+                lines.append(f"`{i}.` **{r['title']}** – {r['artist']}")
+            result_msg = "🎵 **Choose a song (reply with number):**\n" + "\n".join(lines)
+            await msg.edit(content=result_msg)
+
+            def check(m):
+                return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
+
+            try:
+                selection_msg = await bot.wait_for('message', check=check, timeout=30)
+                choice = int(selection_msg.content) - 1
+                if choice < 0 or choice >= len(results):
+                    await ctx.reply("❌ Invalid number.", mention_author=False)
+                    await browser.close()
                     return
-                data = await resp.json()
 
-                # Extract results from the response
-                results = data.get('data', {}).get('results', [])
-                if not results:
-                    await msg.edit(content="❌ No songs found.")
+                selected = results[choice]
+                download_url = selected.get('downloadUrl')
+                if not download_url:
+                    await ctx.reply("❌ No download URL for this song.", mention_author=False)
+                    await browser.close()
                     return
 
-                # Limit to 10
-                results = results[:10]
+                await ctx.reply(f"📥 Downloading **{selected['title']}** by {selected['artist']}...", mention_author=False)
 
-                # Build selection list
-                result_lines = []
-                for i, track in enumerate(results, 1):
-                    title = track.get('name', 'Unknown')
-                    artists = track.get('artists', [])
-                    artist_names = ', '.join([a.get('name', '') for a in artists]) if artists else 'Unknown'
-                    result_lines.append(f"`{i}.` **{title}** – {artist_names}")
-                result_msg = "🎵 **Choose a song (reply with number):**\n" + "\n".join(result_lines)
-                await msg.edit(content=result_msg)
-
-                # 2. Wait for user selection
-                def check(m):
-                    return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
-                try:
-                    selection_msg = await bot.wait_for('message', check=check, timeout=30)
-                    choice = int(selection_msg.content) - 1
-                    if choice < 0 or choice >= len(results):
-                        await ctx.reply("❌ Invalid number.", mention_author=False)
-                        return
-                    selected = results[choice]
-
-                    # Get the download URL for 320kbps
-                    # The API returns a 'downloadUrl' list of objects with quality and url
-                    download_url = None
-                    # Look for the highest quality (320kbps) in the downloadUrl list
-                    if 'downloadUrl' in selected and isinstance(selected['downloadUrl'], list):
-                        for item in selected['downloadUrl']:
-                            if item.get('quality') == '320kbps':
-                                download_url = item.get('url')
-                                break
-                        # If 320kbps not found, take the highest available
-                        if not download_url:
-                            download_url = selected['downloadUrl'][-1].get('url') if selected['downloadUrl'] else None
-                    # Fallback: try 'media_url'
-                    if not download_url:
-                        download_url = selected.get('media_url')
-                    if not download_url:
-                        await ctx.reply("❌ Download URL not available for this song.", mention_author=False)
-                        return
-
-                    title = selected.get('name', 'Song')
-                    artists = selected.get('artists', [])
-                    artist_names = ', '.join([a.get('name', '') for a in artists]) if artists else 'Unknown'
-
-                    await ctx.reply(f"📥 Downloading **{title}** by {artist_names} (320kbps)...", mention_author=False)
-
-                    # 4. Download the file
+                # Download the file with aiohttp
+                async with aiohttp.ClientSession() as session:
                     async with session.get(download_url) as file_resp:
                         if file_resp.status != 200:
-                            await ctx.reply("❌ Failed to download the song.", mention_author=False)
+                            await ctx.reply("❌ Failed to download.", mention_author=False)
+                            await browser.close()
                             return
                         file_data = await file_resp.read()
                         file_size = len(file_data)
 
-                    # 5. Upload to Discord (8MB limit)
-                    filename = f"{title.replace('/', '-').replace(' ', '_')}.mp3"
-                    if file_size > 8 * 1024 * 1024:
-                        await ctx.reply(f"⚠️ File too large ({file_size/1024/1024:.1f}MB) to upload. Download it directly: {download_url}", mention_author=False)
-                        return
+                filename = f"{selected['title'].replace('/', '-').replace(' ', '_')}.mp3"
+                if file_size > 8 * 1024 * 1024:
+                    await ctx.reply(f"⚠️ File too large ({file_size/1024/1024:.1f}MB). Direct link: {download_url}", mention_author=False)
+                    await browser.close()
+                    return
 
-                    await ctx.reply("📤 Uploading to Discord...", mention_author=False)
-                    file_obj = discord.File(io.BytesIO(file_data), filename=filename)
-                    await ctx.reply(f"✅ **{title}** by {artist_names}", file=file_obj, mention_author=False)
+                await ctx.reply("📤 Uploading to Discord...", mention_author=False)
+                file_obj = discord.File(io.BytesIO(file_data), filename=filename)
+                await ctx.reply(f"✅ **{selected['title']}** by {selected['artist']}", file=file_obj, mention_author=False)
 
-                except asyncio.TimeoutError:
-                    await ctx.reply("⏰ Selection timed out.", mention_author=False)
+            except asyncio.TimeoutError:
+                await ctx.reply("⏰ Selection timed out.", mention_author=False)
+            finally:
+                await browser.close()
 
+    except ImportError:
+        await ctx.reply("❌ Playwright not installed. Ask owner to add `playwright` to requirements and install browsers.", mention_author=False)
     except Exception as e:
         await ctx.reply(f"❌ Error: {e}", mention_author=False)
 
