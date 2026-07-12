@@ -291,7 +291,7 @@ async def image_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.reply(f"⏳ Please wait {error.retry_after:.1f}s before using `+image` again.", mention_author=False)
 
-# --- TRANSLATE (with reply detection) ---
+# --- TRANSLATE (with Gemini fallback) ---
 @bot.command(name="translate")
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def translate_cmd(ctx, target_lang: str, *, text: str = None):
@@ -323,7 +323,11 @@ async def translate_cmd(ctx, target_lang: str, *, text: str = None):
         return
     source_name = utils.LANGUAGE_CODES.get(result['source'], result['source'])
     target_name = utils.LANGUAGE_CODES.get(result['target'], result['target'])
-    reply = f"**{source_name} → {target_name}**\n{result['translated']}"
+    # If source is unknown, omit it
+    if result['source'] == "unknown":
+        reply = f"**→ {target_name}**\n{result['translated']}"
+    else:
+        reply = f"**{source_name} → {target_name}**\n{result['translated']}"
     await ctx.reply(reply, mention_author=False)
 
 @translate_cmd.error

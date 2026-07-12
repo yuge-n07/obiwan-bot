@@ -42,6 +42,7 @@ LANGUAGE_CODES = {
 }
 
 async def translate_text(text, target_lang):
+    # First try LibreTranslate
     try:
         async with aiohttp.ClientSession() as session:
             # Detect source language
@@ -72,10 +73,29 @@ async def translate_text(text, target_lang):
                         "target": target_lang
                     }
                 else:
-                    return None
+                    print(f"[Translate] LibreTranslate returned {resp.status}, trying Gemini")
+                    raise Exception(f"LibreTranslate status {resp.status}")
     except Exception as e:
-        print(f"[Translate] Error: {e}")
-        return None
+        print(f"[Translate] LibreTranslate error: {e}, falling back to Gemini")
+        # Fallback to Gemini
+        try:
+            # Lazy import to avoid circular dependency
+            import ai
+            model = ai._get_gemini_client()
+            prompt = f"Translate the following text to {target_lang}. Only output the translation, nothing else.\n\nText: {text}"
+            response = model.generate_content(prompt, generation_config={"temperature": 0.3})
+            if response.candidates and response.candidates[0].content:
+                translated = response.text.strip()
+                return {
+                    "translated": translated,
+                    "source": "unknown",
+                    "target": target_lang
+                }
+            else:
+                return None
+        except Exception as e2:
+            print(f"[Translate] Gemini fallback error: {e2}")
+            return None
 
 async def get_language_list():
     return "\n".join(f"`{code}` → {name}" for code, name in LANGUAGE_CODES.items())
