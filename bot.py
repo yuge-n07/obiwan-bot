@@ -5,7 +5,7 @@ import os
 import json
 import io
 from datetime import datetime, timedelta
-from config import DISCORD_TOKEN, PREFIX, OWNER_ID
+from config import DISCORD_TOKEN, PREFIX, OWNER_ID, MAX_HISTORY  # <-- added MAX_HISTORY
 from utils import ensure_dir, format_uptime
 from database import init_db, get_or_create_user, get_all_lore
 from memory import add_user_message, add_assistant_message, get_short_history, clear_short_history, remember_long_term
@@ -31,11 +31,11 @@ intents.messages = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-# In-memory facts (key: user_id, value: dict)
+# In-memory facts
 facts = {}
 
 # ===========================
-# BACKGROUND TASK: DM owner with uptime every 30 min
+# BACKGROUND TASK
 # ===========================
 async def dm_owner_uptime():
     await bot.wait_until_ready()
@@ -135,7 +135,6 @@ async def lore_cmd(ctx):
 
 @bot.command(name="fact")
 async def fact_cmd(ctx, action, key=None, *, value=None):
-    """Store or retrieve a fact about a user."""
     uid = str(ctx.author.id)
     if uid not in facts:
         facts[uid] = {}
@@ -184,7 +183,6 @@ async def search_cmd(ctx, *, query):
 
 @bot.command(name="log")
 async def log_cmd(ctx, *, args=""):
-    """Generate a detailed log of the channel. Use --all to include bot messages."""
     include_bots = "--all" in args
     await ctx.reply("📋 Generating channel log... please wait.", mention_author=False)
     try:
