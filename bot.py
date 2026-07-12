@@ -114,6 +114,11 @@ async def help_cmd(ctx):
         value="`+help` · `+ping` · `+uptime` · `+status` · `+reset` · `+relationship` · `+lore` · `+search` · `+testgemini` · `+fact` · `+log` · `+test` · `+stats` · `+define` · `+suggest` · `+image` · `+translate` · `+langs`",
         inline=False
     )
+    embed.add_field(
+        name="Translate",
+        value="Reply to a message and use `+translate <lang>` to translate that message, or type `+translate <lang> <text>` directly.",
+        inline=False
+    )
     embed.set_footer(text="May the Force be with you.")
     await ctx.reply(embed=embed, mention_author=False)
 
@@ -286,14 +291,31 @@ async def image_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.reply(f"⏳ Please wait {error.retry_after:.1f}s before using `+image` again.", mention_author=False)
 
-# --- TRANSLATE ---
+# --- TRANSLATE (with reply detection) ---
 @bot.command(name="translate")
 @commands.cooldown(1, 5, commands.BucketType.user)
-async def translate_cmd(ctx, target_lang: str, *, text: str):
+async def translate_cmd(ctx, target_lang: str, *, text: str = None):
     target = target_lang.lower()
     if target not in utils.LANGUAGE_CODES:
         await ctx.reply(f"❌ Unknown language code. Use `+langs` to see supported codes.", mention_author=False)
         return
+
+    # If text is not provided, try to fetch from replied message
+    if text is None:
+        if ctx.message.reference:
+            try:
+                ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+                text = ref_msg.clean_content
+                if not text:
+                    await ctx.reply("❌ The replied message has no text to translate.", mention_author=False)
+                    return
+            except Exception as e:
+                await ctx.reply(f"❌ Could not fetch referenced message: {e}", mention_author=False)
+                return
+        else:
+            await ctx.reply("❌ Please provide text to translate or reply to a message.", mention_author=False)
+            return
+
     await ctx.reply(f"🔄 Translating to `{utils.LANGUAGE_CODES[target]}`...", mention_author=False)
     result = await translate_text(text, target)
     if not result:
@@ -309,7 +331,7 @@ async def translate_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.reply(f"⏳ Please wait {error.retry_after:.1f}s before translating again.", mention_author=False)
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.reply("Usage: `+translate <language_code> <text>`\nExample: `+translate es Hello world`", mention_author=False)
+        await ctx.reply("Usage: `+translate <language_code> <text>` or reply to a message and use `+translate <language_code>`", mention_author=False)
 
 # --- LANGS ---
 @bot.command(name="langs")
