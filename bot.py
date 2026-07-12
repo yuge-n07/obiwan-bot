@@ -14,7 +14,7 @@ from database import init_db, get_or_create_user, get_all_lore, set_fact, get_fa
 from memory import add_user_message, add_assistant_message, get_short_history, clear_short_history, remember_long_term
 from context import get_recent_channel_messages
 from ai import generate_reply, generate_from_raw_info, _get_gemini_client
-from search import search  # old web search
+from search import search
 from lore import seed_lore
 from relationship import get_relationship_summary
 from moderation import is_toxic
@@ -34,7 +34,6 @@ intents.messages = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-# In-memory mood storage (per user)
 user_moods = {}
 
 # ===========================
@@ -125,8 +124,8 @@ async def help_cmd(ctx):
         inline=False
     )
     embed.add_field(
-        name="Search & Music",
-        value="`+song <query>` – search, choose, download & upload from Saavn\n`+websearch <query>` – general web search (DuckDuckGo/Wikipedia)",
+        name="Music Search",
+        value="`+song <query>` – search Saavn, choose, download 320kbps MP3 and upload to Discord",
         inline=False
     )
     embed.set_footer(text="May the Force be with you.")
@@ -150,7 +149,7 @@ async def lore_cmd(ctx):
         await ctx.reply("No lore stored.", mention_author=False)
 
 # ===========================
-# FACT (persistent)
+# FACT
 # ===========================
 @bot.command(name="fact")
 @commands.cooldown(1, 5, commands.BucketType.user)
@@ -315,7 +314,7 @@ async def image_error(ctx, error):
         await ctx.reply(f"⏳ Please wait {error.retry_after:.1f}s before using `+image` again.", mention_author=False)
 
 # ===========================
-# TRANSLATE (with Gemini fallback)
+# TRANSLATE
 # ===========================
 @bot.command(name="translate")
 @commands.cooldown(1, 5, commands.BucketType.user)
@@ -324,7 +323,6 @@ async def translate_cmd(ctx, target_lang: str, *, text: str = None):
     if target not in utils.LANGUAGE_CODES:
         await ctx.reply(f"❌ Unknown language code. Use `+langs` to see supported codes.", mention_author=False)
         return
-
     if text is None:
         if ctx.message.reference:
             try:
@@ -339,7 +337,6 @@ async def translate_cmd(ctx, target_lang: str, *, text: str = None):
         else:
             await ctx.reply("❌ Please provide text to translate or reply to a message.", mention_author=False)
             return
-
     await ctx.reply(f"🔄 Translating to `{utils.LANGUAGE_CODES[target]}`...", mention_author=False)
     result = await translate_text(text, target)
     if not result:
@@ -388,27 +385,26 @@ async def websearch_error(ctx, error):
         await ctx.reply(f"⏳ Please wait {error.retry_after:.1f}s before searching again.", mention_author=False)
 
 # ===========================
-# SONG – Saavn search & download (new)
+# SONG – Saavn search & download (working 320kbps)
 # ===========================
 @bot.command(name="song")
 @commands.cooldown(1, 10, commands.BucketType.user)
 async def saavn_song(ctx, *, query):
-    """Search for a song on Saavn, download and upload it."""
-    # 1. Searching
+    """Search for a song on Saavn, download and upload the 320kbps MP3."""
     msg = await ctx.reply("🔍 Searching for songs...", mention_author=False)
 
     try:
         async with aiohttp.ClientSession() as session:
-            # Saavn API endpoint
-            url = f"https://saavn.squid.wtf/api?type=song&query={query.replace(' ', '+')}"
-            async with session.get(url) as resp:
+            # Use the working saavn.dev API
+            search_url = f"https://saavn.dev/api/search?query={query.replace(' ', '+')}"
+            async with session.get(search_url) as resp:
                 if resp.status != 200:
                     await msg.edit(content="❌ Saavn API error. Please try again later.")
                     return
                 data = await resp.json()
 
-                # The API might return different structures; try common keys
-                results = data.get('results') or data.get('data') or data.get('songs')
+                # Extract results from the response
+                results = data.get('data', {}).get('results', [])
                 if not results:
                     await msg.edit(content="❌ No songs found.")
                     return
@@ -419,15 +415,14 @@ async def saavn_song(ctx, *, query):
                 # Build selection list
                 result_lines = []
                 for i, track in enumerate(results, 1):
-                    title = track.get('title', track.get('name', 'Unknown'))
-                    artist = track.get('artist', track.get('primary_artists', track.get('artists', 'Unknown')))
-                    if isinstance(artist, list):
-                        artist = ', '.join(artist)
-                    result_lines.append(f"`{i}.` **{title}** – {artist}")
+                    title = track.get('name', 'Unknown')
+                    artists = track.get('artists', [])
+                    artist_names = ', '.join([a.get('name', '') for a in artists]) if artists else 'Unknown'
+                    result_lines.append(f"`{i}.` **{title}** – {artist_names}")
                 result_msg = "🎵 **Choose a song (reply with number):**\n" + "\n".join(result_lines)
                 await msg.edit(content=result_msg)
 
-                # 2. Wait for user selection (only numbers)
+                # 2. Wait for user selection
                 def check(m):
                     return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
                 try:
@@ -438,28 +433,30 @@ async def saavn_song(ctx, *, query):
                         return
                     selected = results[choice]
 
-                    # 3. Get download URL – try different possible keys
-                    download_url = selected.get('downloadUrl') or selected.get('media_url') or selected.get('url')
-                    if not download_url:
-                        # Sometimes the API has a 'song' object
-                        if 'song' in selected and isinstance(selected['song'], dict):
-                            download_url = selected['song'].get('download_url') or selected['song'].get('url')
-                    if not download_url:
-                        # Try any key that contains 'url'
-                        for key in selected:
-                            if 'url' in key.lower() and isinstance(selected[key], str):
-                                download_url = selected[key]
+                    # Get the download URL for 320kbps
+                    # The API returns a 'downloadUrl' list of objects with quality and url
+                    download_url = None
+                    # Look for the highest quality (320kbps) in the downloadUrl list
+                    if 'downloadUrl' in selected and isinstance(selected['downloadUrl'], list):
+                        for item in selected['downloadUrl']:
+                            if item.get('quality') == '320kbps':
+                                download_url = item.get('url')
                                 break
+                        # If 320kbps not found, take the highest available
+                        if not download_url:
+                            download_url = selected['downloadUrl'][-1].get('url') if selected['downloadUrl'] else None
+                    # Fallback: try 'media_url'
+                    if not download_url:
+                        download_url = selected.get('media_url')
                     if not download_url:
                         await ctx.reply("❌ Download URL not available for this song.", mention_author=False)
                         return
 
-                    title = selected.get('title', selected.get('name', 'Song'))
-                    artist = selected.get('artist', selected.get('primary_artists', 'Unknown'))
-                    if isinstance(artist, list):
-                        artist = ', '.join(artist)
+                    title = selected.get('name', 'Song')
+                    artists = selected.get('artists', [])
+                    artist_names = ', '.join([a.get('name', '') for a in artists]) if artists else 'Unknown'
 
-                    await ctx.reply(f"📥 Downloading **{title}** by {artist}...", mention_author=False)
+                    await ctx.reply(f"📥 Downloading **{title}** by {artist_names} (320kbps)...", mention_author=False)
 
                     # 4. Download the file
                     async with session.get(download_url) as file_resp:
@@ -469,16 +466,15 @@ async def saavn_song(ctx, *, query):
                         file_data = await file_resp.read()
                         file_size = len(file_data)
 
-                    # 5. Upload to Discord (check size limit)
+                    # 5. Upload to Discord (8MB limit)
                     filename = f"{title.replace('/', '-').replace(' ', '_')}.mp3"
-                    # Discord limit: 8MB (or 25MB with Nitro)
                     if file_size > 8 * 1024 * 1024:
                         await ctx.reply(f"⚠️ File too large ({file_size/1024/1024:.1f}MB) to upload. Download it directly: {download_url}", mention_author=False)
                         return
 
                     await ctx.reply("📤 Uploading to Discord...", mention_author=False)
                     file_obj = discord.File(io.BytesIO(file_data), filename=filename)
-                    await ctx.reply(f"✅ **{title}** by {artist}", file=file_obj, mention_author=False)
+                    await ctx.reply(f"✅ **{title}** by {artist_names}", file=file_obj, mention_author=False)
 
                 except asyncio.TimeoutError:
                     await ctx.reply("⏰ Selection timed out.", mention_author=False)
@@ -492,11 +488,10 @@ async def saavn_song_error(ctx, error):
         await ctx.reply(f"⏳ Please wait {error.retry_after:.1f}s before using `+song` again.", mention_author=False)
 
 # ===========================
-# DEEZER – old song info (kept as optional)
+# DEEZER (optional, keep as is)
 # ===========================
 @bot.command(name="deezer")
 async def deezer_cmd(ctx, *, query):
-    """Search for song info on Deezer (no download)."""
     await ctx.reply(f"🎵 Searching Deezer for `{query}`...", mention_author=False)
     try:
         async with aiohttp.ClientSession() as session:
@@ -529,11 +524,10 @@ async def deezer_cmd(ctx, *, query):
         await ctx.reply(f"❌ Error: {e}", mention_author=False)
 
 # ===========================
-# GAMES & MEDIA COMMANDS
+# GAMES / MEDIA
 # ===========================
 @bot.command(name="rps")
 async def rps(ctx, choice: str = None):
-    """Play Rock-Paper-Scissors against the bot."""
     if choice is None:
         await ctx.reply("Choose one: `rock`, `paper`, or `scissors`.", mention_author=False)
         return
@@ -555,7 +549,6 @@ async def rps(ctx, choice: str = None):
 @bot.command(name="trivia")
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def trivia(ctx):
-    """Get a random trivia question."""
     await ctx.reply("🧠 Fetching a trivia question...", mention_author=False)
     try:
         async with aiohttp.ClientSession() as session:
@@ -596,7 +589,6 @@ async def trivia_error(ctx, error):
 
 @bot.command(name="meme")
 async def meme(ctx):
-    """Get a random meme from r/memes."""
     await ctx.reply("🖼️ Fetching a meme...", mention_author=False)
     try:
         url = "https://meme-api.com/gimme"
@@ -618,7 +610,6 @@ async def meme(ctx):
 
 @bot.command(name="roll")
 async def roll(ctx, dice: str = "1d6"):
-    """Roll dice. Usage: +roll 2d6 (default 1d6)"""
     match = re.match(r"^(\d+)d(\d+)$", dice)
     if not match:
         await ctx.reply("Invalid format. Use e.g., `+roll 2d6` (number of dice, number of sides).", mention_author=False)
@@ -633,13 +624,11 @@ async def roll(ctx, dice: str = "1d6"):
 
 @bot.command(name="coin")
 async def coin(ctx):
-    """Flip a coin."""
     result = random.choice(["Heads", "Tails"])
     await ctx.reply(f"🪙 **{result}**!", mention_author=False)
 
 @bot.command(name="mood")
 async def mood(ctx, new_mood: str = None):
-    """Change Obi-Wan's mood. Options: wise, sassy, serious, playful"""
     moods = ["wise", "sassy", "serious", "playful"]
     if new_mood is None:
         current = user_moods.get(ctx.author.id, "wise")
@@ -654,7 +643,6 @@ async def mood(ctx, new_mood: str = None):
 
 @bot.command(name="leaderboard")
 async def leaderboard(ctx):
-    """Show top 10 users by interaction count (memories)."""
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
@@ -683,7 +671,7 @@ async def leaderboard(ctx):
     await ctx.reply(embed=embed, mention_author=False)
 
 # ===========================
-# TEST SEARCH (debug)
+# TEST SEARCH & LOG
 # ===========================
 @bot.command(name="testsearch")
 async def testsearch_cmd(ctx, *, query):
@@ -694,9 +682,6 @@ async def testsearch_cmd(ctx, *, query):
     else:
         await ctx.reply("❌ No result.", mention_author=False)
 
-# ===========================
-# LOG
-# ===========================
 @bot.command(name="log")
 async def log_cmd(ctx, *, args=""):
     include_bots = "--all" in args
