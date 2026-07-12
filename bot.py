@@ -102,7 +102,7 @@ ensure_dir("memories")
 ensure_dir("cache")
 
 # ===========================
-# DATABASE FUNCTIONS
+# DATABASE FUNCTIONS (unchanged – same as before)
 # ===========================
 def get_connection():
     conn = sqlite3.connect(DATABASE_PATH)
@@ -405,15 +405,12 @@ def _get_gemini_client():
 def gemini_search(query):
     try:
         model = _get_gemini_client()
-        # Enable google_search tool correctly
         response = model.generate_content(
             query,
             generation_config={"temperature": 0.2},
             tools=[{"google_search": {}}]
         )
-        # Check if we got a search result
         if response.candidates and response.candidates[0].content:
-            # Extract text from the response
             return response.text
         else:
             print("[Gemini] No search result.")
@@ -476,31 +473,40 @@ intents.messages = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
 # ===========================
-# BACKGROUND TASK: DM owner every 30 mins with uptime
+# BACKGROUND TASK: DM owner immediately and then every 30 mins
 # ===========================
 async def dm_owner_uptime():
     await bot.wait_until_ready()
     owner = bot.get_user(OWNER_ID)
     if not owner:
-        print(f"⚠️ Could not find owner with ID {OWNER_ID}")
+        print(f"⚠️ Could not find owner with ID {OWNER_ID}. Check your OWNER_ID env var.")
         return
+    print(f"✅ Owner found: {owner.name}#{owner.discriminator} (ID: {owner.id})")
+
+    # Send first DM immediately
+    await send_uptime_dm(owner)
+
+    # Then loop every 30 minutes
     while not bot.is_closed():
-        now = datetime.utcnow()
-        uptime = now - START_TIME
-        days = uptime.days
-        hours, remainder = divmod(uptime.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        message = (
-            f"⏰ **Uptime Report**\n"
-            f"I've been online for **{days}d {hours}h {minutes}m {seconds}s**.\n"
-            f"Deployed since: {START_TIME.strftime('%Y-%m-%d %H:%M:%S')} UTC"
-        )
-        try:
-            await owner.send(message)
-            print("[Uptime] DM sent to owner.")
-        except Exception as e:
-            print(f"[Uptime] Failed to DM owner: {e}")
         await asyncio.sleep(1800)  # 30 minutes
+        await send_uptime_dm(owner)
+
+async def send_uptime_dm(user):
+    now = datetime.utcnow()
+    uptime = now - START_TIME
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    message = (
+        f"⏰ **Uptime Report**\n"
+        f"I've been online for **{days}d {hours}h {minutes}m {seconds}s**.\n"
+        f"Deployed since: {START_TIME.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    )
+    try:
+        await user.send(message)
+        print("[Uptime] DM sent to owner.")
+    except Exception as e:
+        print(f"[Uptime] Failed to DM owner: {e}")
 
 # ===========================
 # COMMANDS
@@ -512,6 +518,18 @@ async def test(ctx):
 @bot.command(name="ping")
 async def ping(ctx):
     await ctx.reply(f"🏓 Pong! {round(bot.latency * 1000)} ms", mention_author=False)
+
+@bot.command(name="uptime")
+async def uptime_cmd(ctx):
+    now = datetime.utcnow()
+    uptime = now - START_TIME
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    await ctx.reply(
+        f"⏱️ I've been online for **{days}d {hours}h {minutes}m {seconds}s**.",
+        mention_author=False
+    )
 
 @bot.command(name="reset")
 async def reset(ctx):
@@ -525,7 +543,7 @@ async def help_cmd(ctx):
         description="I speak calmly and carry a lightsaber.",
         color=0x3498db
     )
-    embed.add_field(name="Commands", value="`+help` · `+ping` · `+reset` · `+relationship` · `+lore` · `+search` · `+test`", inline=False)
+    embed.add_field(name="Commands", value="`+help` · `+ping` · `+uptime` · `+reset` · `+relationship` · `+lore` · `+search` · `+test`", inline=False)
     embed.set_footer(text="May the Force be with you.")
     await ctx.reply(embed=embed, mention_author=False)
 
@@ -593,7 +611,7 @@ async def on_ready():
     print(f"Commands: {[c.name for c in bot.commands]}")
     print(f"Owner ID: {OWNER_ID}")
 
-    # Start the background DM task
+    # Start the background DM task (will DM immediately)
     bot.loop.create_task(dm_owner_uptime())
 
 @bot.event
