@@ -11,7 +11,7 @@ from groq import Groq
 import google.generativeai as genai
 
 # ===========================
-# CONFIG – All secrets from environment
+# CONFIG
 # ===========================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 if not DISCORD_TOKEN:
@@ -43,9 +43,6 @@ MAX_TOKENS = int(os.getenv("MAX_TOKENS", 350))
 OWNER_ID = int(os.getenv("OWNER_ID", 778695192684920842))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "database/bot.db")
 
-# ===========================
-# START TIME – uptime tracking
-# ===========================
 START_TIME = datetime.utcnow()
 
 # ===========================
@@ -102,7 +99,7 @@ ensure_dir("memories")
 ensure_dir("cache")
 
 # ===========================
-# DATABASE FUNCTIONS (unchanged – same as before)
+# DATABASE FUNCTIONS (full, keep from earlier)
 # ===========================
 def get_connection():
     conn = sqlite3.connect(DATABASE_PATH)
@@ -391,7 +388,7 @@ def generate_from_raw_info(user_id, query, raw_info):
     return "I'm sorry, I couldn't retrieve that information at the moment."
 
 # ===========================
-# GEMINI SEARCH WITH KEY ROTATION (FIXED)
+# GEMINI 3.5 FLASH SEARCH WITH KEY ROTATION
 # ===========================
 _gemini_index = 0
 
@@ -400,7 +397,8 @@ def _get_gemini_client():
     key = GEMINI_KEYS[_gemini_index % len(GEMINI_KEYS)]
     _gemini_index += 1
     genai.configure(api_key=key)
-    return genai.GenerativeModel("gemini-1.5-flash")
+    # Use Gemini 3.5 Flash
+    return genai.GenerativeModel("gemini-3.5-flash")
 
 def gemini_search(query):
     try:
@@ -408,9 +406,11 @@ def gemini_search(query):
         response = model.generate_content(
             query,
             generation_config={"temperature": 0.2},
-            tools=[{"google_search": {}}]
+            tools=[{"google_search": {}}]   # Enable Google Search grounding
         )
+        # Check if we got a search result
         if response.candidates and response.candidates[0].content:
+            # Return the text
             return response.text
         else:
             print("[Gemini] No search result.")
@@ -420,20 +420,13 @@ def gemini_search(query):
         return None
 
 # ===========================
-# FALLBACK SEARCH (DuckDuckGo with proper headers)
+# FALLBACK: DuckDuckGo
 # ===========================
 def duckduckgo_search(query):
     try:
         url = "https://api.duckduckgo.com/"
-        params = {
-            "q": query,
-            "format": "json",
-            "no_html": 1,
-            "skip_disambig": 1
-        }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
@@ -473,7 +466,7 @@ intents.messages = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
 # ===========================
-# BACKGROUND TASK: DM owner immediately and then every 30 mins
+# BACKGROUND TASK: DM owner immediately and every 30 mins
 # ===========================
 async def dm_owner_uptime():
     await bot.wait_until_ready()
@@ -481,14 +474,10 @@ async def dm_owner_uptime():
     if not owner:
         print(f"⚠️ Could not find owner with ID {OWNER_ID}. Check your OWNER_ID env var.")
         return
-    print(f"✅ Owner found: {owner.name}#{owner.discriminator} (ID: {owner.id})")
-
-    # Send first DM immediately
+    print(f"✅ Owner found: {owner.name} (ID: {owner.id})")
     await send_uptime_dm(owner)
-
-    # Then loop every 30 minutes
     while not bot.is_closed():
-        await asyncio.sleep(1800)  # 30 minutes
+        await asyncio.sleep(1800)
         await send_uptime_dm(owner)
 
 async def send_uptime_dm(user):
@@ -504,9 +493,9 @@ async def send_uptime_dm(user):
     )
     try:
         await user.send(message)
-        print("[Uptime] DM sent to owner.")
+        print("[Uptime] DM sent.")
     except Exception as e:
-        print(f"[Uptime] Failed to DM owner: {e}")
+        print(f"[Uptime] Failed to DM: {e}")
 
 # ===========================
 # COMMANDS
@@ -526,10 +515,7 @@ async def uptime_cmd(ctx):
     days = uptime.days
     hours, remainder = divmod(uptime.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
-    await ctx.reply(
-        f"⏱️ I've been online for **{days}d {hours}h {minutes}m {seconds}s**.",
-        mention_author=False
-    )
+    await ctx.reply(f"⏱️ I've been online for **{days}d {hours}h {minutes}m {seconds}s**.", mention_author=False)
 
 @bot.command(name="reset")
 async def reset(ctx):
@@ -561,12 +547,28 @@ async def lore_cmd(ctx):
     else:
         await ctx.reply("No lore stored.", mention_author=False)
 
+@bot.command(name="testsearch")
+async def testsearch_cmd(ctx, *, query):
+    """Test search and show raw result."""
+    await ctx.reply(f"🔍 Testing search for: `{query}`", mention_author=False)
+    # Try Gemini
+    raw = await asyncio.to_thread(gemini_search, query)
+    if raw:
+        await ctx.reply(f"✅ Gemini result:\n```{raw[:500]}```", mention_author=False)
+    else:
+        # Try DuckDuckGo
+        raw = await asyncio.to_thread(duckduckgo_search, query)
+        if raw:
+            await ctx.reply(f"✅ DuckDuckGo result:\n```{raw[:500]}```", mention_author=False)
+        else:
+            await ctx.reply("❌ No result from either search engine.", mention_author=False)
+
 @bot.command(name="search")
 async def search_cmd(ctx, *, query):
     print(f"[COMMAND] +search invoked with query: {query}")
     await ctx.reply("🔍 Searching the galaxy for you...", mention_author=False)
 
-    # Try Gemini first
+    # Try Gemini
     try:
         raw = await asyncio.to_thread(gemini_search, query)
         print(f"[COMMAND] Gemini raw result: {raw[:200] if raw else None}")
@@ -594,6 +596,7 @@ async def search_cmd(ctx, *, query):
         print(f"[COMMAND] Rephrased reply: {reply[:100]}")
     except Exception as e:
         print(f"[COMMAND] Rephrase error: {e}")
+        # If rephrase fails, send raw result
         await ctx.reply(raw, mention_author=False)
         return
     await ctx.reply(reply, mention_author=False)
@@ -610,8 +613,6 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     print(f"Commands: {[c.name for c in bot.commands]}")
     print(f"Owner ID: {OWNER_ID}")
-
-    # Start the background DM task (will DM immediately)
     bot.loop.create_task(dm_owner_uptime())
 
 @bot.event
