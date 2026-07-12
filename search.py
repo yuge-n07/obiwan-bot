@@ -1,6 +1,8 @@
 import requests
+import os
+import re
 
-def search(query):
+def duckduckgo_search(query):
     try:
         url = "https://api.duckduckgo.com/"
         params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
@@ -15,8 +17,33 @@ def search(query):
                 if "Text" in topic:
                     return topic["Text"]
                 if "Result" in topic:
-                    return topic["Result"]
+                    # clean HTML tags
+                    return re.sub(r'<[^>]+>', '', topic["Result"])
         return None
     except Exception as e:
-        print(f"Search error: {e}")
+        print(f"[DuckDuckGo] Error: {e}")
         return None
+
+def wikipedia_search(query):
+    try:
+        url = "https://en.wikipedia.org/api/rest_v1/page/summary/"
+        # Sanitize query
+        page = query.strip().replace(" ", "_")
+        r = requests.get(url + page, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("extract"):
+                return data["extract"]
+        return None
+    except Exception as e:
+        print(f"[Wikipedia] Error: {e}")
+        return None
+
+def search(query):
+    # Try DuckDuckGo first
+    result = duckduckgo_search(query)
+    if result:
+        return result
+    # Fallback to Wikipedia
+    print("[Search] Falling back to Wikipedia")
+    return wikipedia_search(query)
