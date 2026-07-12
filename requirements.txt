@@ -1,0 +1,5 @@
+discord.py
+groq
+requests
+google-generativeai
+EOF

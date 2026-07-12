@@ -1,0 +1,10 @@
+__pycache__/
+database/
+logs/
+memories/
+cache/
+*.db
+*.sqlite3
+.env
+*.pyc
+*.log
